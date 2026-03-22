@@ -31,8 +31,7 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 import torch
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from model_utils import LocalModel
+from model_utils import LocalModel, load_local_model
 
 # Add project paths for SNMF repo imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent
