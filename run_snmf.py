@@ -1,16 +1,15 @@
 """
 SNMF Runner for Local Models
 
-Runs Semi-Nonnegative Matrix Factorization (SNMF) on a local model to discover
-interpretable features in MLP activations.
+Runs SNMF on a local model to discover interpretable features in MLP activations.
 
 This script adapts the snmf-mlp-decomposition project to work with local models
-(like your gemma-2-0.1B_all_arithmetic+eng).
+(like gemma-2-0.3B_all_arithmetic+eng).
 
 Usage:
     python -m targeted_undo.run_snmf \
-        --model-path gemma-2-0.1B_all_arithmetic+eng/final_model \
-        --data-path src/snmf-mlp-decomposition/data/arithmetic.json \
+        --model-path models/gemma2-2.03B_best_unlearn_model \
+        --data-path data/data.json \
         --output-dir outputs/snmf_results \
         --layers 0,1,2,3,4,5 \
         --rank 50 \
@@ -21,7 +20,6 @@ Output:
     - snmf_analysis.json: Feature interpretations and statistics
 """
 
-import sys
 import argparse
 import json
 import random
@@ -31,16 +29,6 @@ import numpy as np
 import torch
 from model_utils import LocalModel, load_local_model
 from activation_utils import LocalActivationGenerator
-
-# Add project paths for SNMF repo imports
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-SNMF_REPO_PATH = PROJECT_ROOT
-SNMF_EXPERIMENTS_PATH = SNMF_REPO_PATH / "experiments"
-
-if str(SNMF_REPO_PATH) not in sys.path:
-    sys.path.insert(0, str(SNMF_REPO_PATH))
-if str(SNMF_EXPERIMENTS_PATH) not in sys.path:
-    sys.path.insert(0, str(SNMF_EXPERIMENTS_PATH))
 
 
 def set_seed(seed: int) -> None:
