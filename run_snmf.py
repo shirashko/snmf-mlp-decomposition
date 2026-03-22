@@ -26,7 +26,6 @@ import argparse
 import json
 import random
 from pathlib import Path
-from datetime import datetime
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import torch
@@ -44,17 +43,6 @@ if str(SNMF_EXPERIMENTS_PATH) not in sys.path:
     sys.path.insert(0, str(SNMF_EXPERIMENTS_PATH))
 
 
-# ------------------------------
-# Logging Helper
-# ------------------------------
-def log(txt: str) -> None:
-    """Print timestamped log message."""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {txt}", flush=True)
-
-
-# ------------------------------
-# Seed Setting
-# ------------------------------
 def set_seed(seed: int) -> None:
     """Set random seed for reproducibility."""
     random.seed(seed)
@@ -64,9 +52,6 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# ------------------------------
-# Dataset Loading
-# ------------------------------
 def load_concept_dataset(data_path: str) -> Tuple[List[str], List[str]]:
     """
     Load concept dataset in SNMF format.
@@ -74,7 +59,7 @@ def load_concept_dataset(data_path: str) -> Tuple[List[str], List[str]]:
     Returns:
         (prompts, labels) - Lists of prompts and their concept labels
     """
-    log(f"Loading dataset from {data_path}...")
+    print(f"Loading dataset from {data_path}...")
 
     with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -87,15 +72,10 @@ def load_concept_dataset(data_path: str) -> Tuple[List[str], List[str]]:
             prompts.append(text)
             labels.append(concept)
 
-    log(f"Loaded {len(prompts)} samples across {len(data)} concepts")
+    print(f"Loaded {len(prompts)} samples across {len(data)} concepts")
     return prompts, labels
 
 
-
-
-# ------------------------------
-# SNMF Factorization
-# ------------------------------
 def run_snmf(
         activations: torch.Tensor,
         rank: int,
@@ -125,14 +105,14 @@ def run_snmf(
     # Import SNMF from the vendored package
     from factorization.seminmf import NMFSemiNMF
 
-    log(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
-    log(f"  Input shape: {activations.shape}")
+    print(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
+    print(f"  Input shape: {activations.shape}")
 
     # Optional: normalize activations (helps with intermediate MLP)
     if normalize:
         norms = activations.norm(dim=1, keepdim=True).clamp_min(1e-8)
         activations = activations / norms
-        log(f"  Normalized activations (L2 per sample)")
+        print(f"  Normalized activations (L2 per sample)")
 
     # SNMF expects (d_features, n_samples), so transpose
     A = activations.T.to(device)
@@ -143,7 +123,7 @@ def run_snmf(
     F = nmf.F_.detach().cpu()  # (d_features, rank)
     G = nmf.G_.detach().cpu()  # (n_samples, rank)
 
-    log(f"  F shape: {F.shape}, G shape: {G.shape}")
+    print(f"  F shape: {F.shape}, G shape: {G.shape}")
 
     return F, G
 
@@ -178,7 +158,7 @@ def analyze_features_supervised(
     Returns:
         Dictionary mapping feature index to analysis results
     """
-    log(f"Analyzing features (supervised, threshold={dominance_threshold})...")
+    print(f"Analyzing features (supervised, threshold={dominance_threshold})...")
 
     n_tokens, rank = G.shape
 
@@ -246,9 +226,9 @@ def analyze_features_supervised(
             concept_features[concept] = []
         concept_features[concept].append(feat_idx)
 
-    log("Feature-to-concept mapping (supervised):")
+    print("Feature-to-concept mapping (supervised):")
     for concept, features in sorted(concept_features.items()):
-        log(f"  {concept}: features {features}")
+        print(f"  {concept}: features {features}")
 
     return feature_analysis
 
@@ -291,7 +271,7 @@ def analyze_features_unsupervised(
     Returns:
         Dictionary mapping feature index to vocab projection results
     """
-    log(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
+    print(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
 
     d_feat, rank = F.shape
     device = local_model.device
@@ -342,19 +322,18 @@ def analyze_features_unsupervised(
 
             feature_analysis[feature_idx] = {
                 'positive_tokens': pos_tokens,
-                'positive_logits': pos_values.cpu().tolist(),
+                'positive_printits': pos_values.cpu().tolist(),
                 'negative_tokens': neg_tokens,
-                'negative_logits': (-neg_values).cpu().tolist(),
+                'negative_printits': (-neg_values).cpu().tolist(),
                 'interpretation': _interpret_tokens(pos_tokens[:10]),
             }
 
-    # Log summary
-    log("Feature vocabulary projections:")
+    print("Feature vocabulary projections:")
     for feat_idx in range(min(rank, 5)):  # Show first 5
         tokens = feature_analysis[feat_idx]['positive_tokens'][:5]
-        log(f"  Feature {feat_idx}: {tokens}")
+        print(f"  Feature {feat_idx}: {tokens}")
     if rank > 5:
-        log(f"  ... and {rank - 5} more features")
+        print(f"  ... and {rank - 5} more features")
 
     return feature_analysis
 
@@ -365,9 +344,6 @@ def _interpret_tokens(tokens: List[str]) -> str:
     return f"Top tokens: {tokens_str}"
 
 
-# ------------------------------
-# Main Entry Point
-# ------------------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Run SNMF on a local model to discover interpretable features.",
@@ -436,31 +412,27 @@ def main():
             layers.append(int(chunk))
     layers = sorted(set(layers))
 
-    # Determine device
-    if args.device:
-        device = args.device
-    elif torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
+    device = args.device or (
+        "cuda" if torch.cuda.is_available() else
+        "mps" if torch.backends.mps.is_available() else
+        "cpu"
+    )
 
     set_seed(args.seed)
 
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    log("=" * 60)
-    log("SNMF Analysis")
-    log("=" * 60)
-    log(f"  Model: {args.model_path}")
-    log(f"  Data: {args.data_path}")
-    log(f"  Layers: {layers}")
-    log(f"  Rank: {args.rank}")
-    log(f"  Mode: {args.mode}")
-    log(f"  Device: {device}")
-    log("=" * 60)
+    print("=" * 60)
+    print("SNMF Analysis")
+    print("=" * 60)
+    print(f"  Model: {args.model_path}")
+    print(f"  Data: {args.data_path}")
+    print(f"  Layers: {layers}")
+    print(f"  Rank: {args.rank}")
+    print(f"  Mode: {args.mode}")
+    print(f"  Device: {device}")
+    print("=" * 60)
 
     # Load model
     model = load_local_model(args.model_path, device=device)
@@ -478,7 +450,7 @@ def main():
     all_results = {}
 
     for layer_idx, layer in enumerate(layers):
-        log(f"\n--- Layer {layer} ---")
+        print(f"\n--- Layer {layer} ---")
 
         activations = activations_per_layer[layer_idx]
 
@@ -539,7 +511,7 @@ def main():
             'num_features': args.rank,
         }
 
-        log(f"  Saved to {layer_output}")
+        print(f"  Saved to {layer_output}")
 
     # Save overall config
     config = {
@@ -560,10 +532,10 @@ def main():
     with open(output_dir / "config.json", 'w') as f:
         json.dump(config, f, indent=2)
 
-    log("\n" + "=" * 60)
-    log("SNMF Analysis Complete!")
-    log(f"Results saved to: {output_dir}")
-    log("=" * 60)
+    print("\n" + "=" * 60)
+    print("SNMF Analysis Complete!")
+    print(f"Results saved to: {output_dir}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
