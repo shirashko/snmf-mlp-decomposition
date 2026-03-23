@@ -64,7 +64,7 @@ class LocalActivationGenerator:
                         padding=True,
                         return_tensors="pt",
                         truncation=True,
-                        max_length=512
+                        max_length=256
                     ).to(self.local_model.device)
 
                     # Forward pass
