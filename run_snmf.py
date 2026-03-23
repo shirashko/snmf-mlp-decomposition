@@ -320,7 +320,7 @@ def parse_layers(layers_str: str) -> List[int]:
     return sorted(set(layers))
 
 
-def main():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run SNMF on a local model to discover interpretable features.",
     )
@@ -375,7 +375,11 @@ def main():
     parser.add_argument("--no-save-raw", dest="save_raw", action="store_false",
                         help="Don't save raw token data (smaller output files)")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
 
     layers = parse_layers(args.layers)
 
