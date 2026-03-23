@@ -133,7 +133,7 @@ def analyze_features_supervised(
 def analyze_features_unsupervised(
         F: torch.Tensor,
         local_model: LocalModel,
-        layer_idx: int,
+        layer: int,
         top_k_tokens: int = 30,
         mode: str = "mlp",
 ) -> Dict[int, Dict[str, Any]]:
@@ -145,14 +145,14 @@ def analyze_features_unsupervised(
                           and rank is the number of latent features.
                           F[i, j] represents the contribution of feature j to the i-th hidden dimension.
         local_model (LocalModel): The loaded model containing the tokenizer and architecture.
-        layer_idx (int): The layer number corresponding to the features in F.
+        layer (int): The layer number corresponding to the features in F.
         top_k_tokens (int): Number of top tokens to retrieve for each feature projection.
         mode (str): Determines how to interpret the features. Options:
             - "mlp_intermediate": Projects the feature through the MLP down-projection and post-FFN layer norm.
             - "mlp": Projects the feature directly through the post-FFN layer norm.
             - "residual": Projects the raw feature vector as a residual without MLP transformations.
     """
-    print(f"Analyzing features (unsupervised vocab projection, layer {layer_idx}, mode={mode})...")
+    print(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
     d_feat, rank = F.shape
     device = local_model.device
     feature_analysis = {}
@@ -163,26 +163,25 @@ def analyze_features_unsupervised(
     with torch.no_grad():
         for feature_idx in range(rank):
             feature_vec = F[:, feature_idx].to(device)
-            layer = base_model.layers[layer]
+            layer_object = base_model.layers[layer]
             if mode == "mlp_intermediate":
-                down_proj = layer.mlp.down_proj
-                residual_vec = down_proj(feature_vec.unsqueeze(0)).squeeze(0)
-                try:
-                    post_ff_ln = layer.post_feedforward_layernorm
-                    concept_vector = post_ff_ln(residual_vec.unsqueeze(0)).squeeze(0)
-                except AttributeError:
-                    concept_vector = residual_vec
-                pos_values, pos_indices = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
-                neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
+                concept_vector = layer_object.mlp.down_proj(feature_vec.unsqueeze(0)).squeeze(0)
             elif mode == "mlp":
+                concept_vector = feature_vec
+            else:
+                concept_vector = None  # We will treat this case as a residual for projection
+
+            if concept_vector is not None:
                 try:
-                    post_ff_ln = layer.post_feedforward_layernorm
-                    concept_vector = post_ff_ln(feature_vec.unsqueeze(0)).squeeze(0)
+                    concept_vector = layer_object.post_feedforward_layernorm(concept_vector.unsqueeze(0)).squeeze(0)
                 except AttributeError:
-                    concept_vector = feature_vec
+                    pass  # if no post-FFN layer norm, just use the concept vector as is
+
+            if mode in ["mlp_intermediate", "mlp"]:
                 pos_values, pos_indices = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
                 neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
             else:
+                # in residual case, we treat the raw feature vector as a residual and project it directly
                 pos_values, pos_indices = get_vocab_proj_residual_hf(feature_vec, hf_model, top_k_tokens, device)
                 neg_values, neg_indices = get_vocab_proj_residual_hf(-feature_vec, hf_model, top_k_tokens, device)
 
