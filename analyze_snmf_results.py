@@ -138,7 +138,10 @@ def analyze_features_unsupervised(
         mode: str = "mlp",
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Analyze features by projecting to vocabulary (unsupervised).
+    Projects latent features into the vocabulary space using Logit Lens.
+
+    This identifies the semantic 'direction' of each feature by observing which tokens
+    it promotes or suppresses in the model's output distribution.
 
     Args:
         F (torch.Tensor): The feature matrix of shape (d, rank) from SNMF, where d hidden dimension
@@ -152,53 +155,58 @@ def analyze_features_unsupervised(
             - "mlp": Projects the feature directly through the post-FFN layer norm.
             - "residual": Projects the raw feature vector as a residual without MLP transformations.
     """
-    print(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
+    print(f"Analyzing features (unsupervised, layer {layer}, mode={mode})...")
     d_feat, rank = F.shape
     device = local_model.device
-    feature_analysis = {}
-
     hf_model = local_model.model
-    base_model = hf_model.model if hasattr(hf_model, "model") else hf_model
+    tokenizer = local_model.tokenizer
+    base_model = getattr(hf_model, "model", hf_model)
+    layer_obj = base_model.layers[layer]
+
+    feature_analysis = {}
 
     with torch.no_grad():
         for feature_idx in range(rank):
             feature_vec = F[:, feature_idx].to(device)
-            layer_object = base_model.layers[layer]
+
+            # Transform feature based on the chosen mode
             if mode == "mlp_intermediate":
-                concept_vector = layer_object.mlp.down_proj(feature_vec.unsqueeze(0)).squeeze(0)
+                # Project from d_mlp back to d_model
+                concept_vector = layer_obj.mlp.down_proj(feature_vec.unsqueeze(0)).squeeze(0)
             elif mode == "mlp":
                 concept_vector = feature_vec
             else:
-                concept_vector = None  # We will treat this case as a residual for projection
+                concept_vector = None  # Residual case
 
+            # Apply LayerNorm if applicable (Gemma 2 specific)
             if concept_vector is not None:
-                try:
-                    concept_vector = layer_object.post_feedforward_layernorm(concept_vector.unsqueeze(0)).squeeze(0)
-                except AttributeError:
-                    pass  # if no post-FFN layer norm, just use the concept vector as is
+                ln_layer = getattr(layer_obj, "post_feedforward_layernorm", None)
+                if ln_layer:
+                    concept_vector = ln_layer(concept_vector.unsqueeze(0)).squeeze(0)
 
+            # Vocabulary Projection
             if mode in ["mlp_intermediate", "mlp"]:
-                pos_values, pos_indices = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
-                neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
+                pos_vals, pos_idx = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
+                neg_vals, neg_idx = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
             else:
-                # in residual case, we treat the raw feature vector as a residual and project it directly
-                pos_values, pos_indices = get_vocab_proj_residual_hf(feature_vec, hf_model, top_k_tokens, device)
-                neg_values, neg_indices = get_vocab_proj_residual_hf(-feature_vec, hf_model, top_k_tokens, device)
+                pos_vals, pos_idx = get_vocab_proj_residual_hf(feature_vec, hf_model, top_k_tokens, device)
+                neg_vals, neg_idx = get_vocab_proj_residual_hf(-feature_vec, hf_model, top_k_tokens, device)
 
-            pos_tokens = [local_model.tokenizer.decode([idx.item()]) for idx in pos_indices]
-            neg_tokens = [local_model.tokenizer.decode([idx.item()]) for idx in neg_indices]
+            # Combining both positive and negative for a single batch call
+            all_indices = torch.cat([pos_idx, neg_idx]).tolist()
+            all_tokens = tokenizer.batch_decode([[i] for i in all_indices])
+
+            pos_tokens = all_tokens[:top_k_tokens]
+            neg_tokens = all_tokens[top_k_tokens:]
 
             feature_analysis[feature_idx] = {
                 'positive_tokens': pos_tokens,
-                'positive_printits': pos_values.cpu().tolist(),
+                'positive_logits': pos_vals.cpu().tolist(),
                 'negative_tokens': neg_tokens,
-                'negative_printits': (-neg_values).cpu().tolist(),
-                'interpretation': _interpret_tokens(pos_tokens[:10]),
+                'negative_logits': (-neg_vals).cpu().tolist(),
+                'interpretation': f"Top promotes: {', '.join(pos_tokens[:5])}",
             }
-    print("Feature vocabulary projections:")
-    for feat_idx in range(min(rank, 5)):
-        tokens = feature_analysis[feat_idx]['positive_tokens'][:5]
-        print(f"  Feature {feat_idx}: {tokens}")
+
     return feature_analysis
 
 def _interpret_tokens(tokens: List[str]) -> str:
