@@ -1,13 +1,14 @@
 import argparse
 import json
 import torch
+from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
+torch.serialization.add_safe_globals([GemmaTokenizerFast])
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
-from model_utils import load_local_model
+from model_utils import load_local_model, LocalModel
 from dotenv import load_dotenv
 from utils import resolve_device, set_seed
-from model_utils import LocalModel
 
 from experiments.snmf_interp.generate_vocab_proj import (
     get_vocab_proj_gemma_hf,
@@ -247,7 +248,7 @@ def main():
             continue
 
         print(f"\nProcessing {layer_folder.name}...")
-        checkpoint = torch.load(factors_path, map_location="cpu")
+        checkpoint = torch.load(factors_path, map_location="cpu", weights_only=False)
 
         F = checkpoint['F']
         G = checkpoint['G']
