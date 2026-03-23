@@ -1,6 +1,6 @@
 import argparse
 import json
-from pyexpat import features
+import pandas as pd
 
 import torch
 from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
@@ -222,6 +222,8 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-raw", action="store_true", help="Include raw token data in output")
+    parser.add_argument("--top-k-unsupervised", type=int, default=30)
+    parser.add_argument("--top-k-supervised", type=int, default=20)
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -248,7 +250,7 @@ def main():
 
         supervised_results = analyze_features_supervised(
             G, labels, sample_ids, token_ids, local_model.tokenizer,
-            dominance_threshold=args.dominance_threshold, save_raw=args.save_raw
+            dominance_threshold=args.dominance_threshold, save_raw=args.save_raw, top_k=args.top_k_supervised
         )
         with open(layer_folder / "feature_analysis_supervised.json", 'w') as f:
             json.dump(supervised_results, f, indent=2)
@@ -258,7 +260,8 @@ def main():
                 F=F,
                 local_model=local_model,
                 layer=layer_num,
-                mode=mode
+                mode=mode,
+                top_k_tokens=args.top_k_unsupervised,
             )
             with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
                 json.dump(unsupervised_results, f, indent=2)
