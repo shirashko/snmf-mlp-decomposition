@@ -133,16 +133,26 @@ def analyze_features_supervised(
 def analyze_features_unsupervised(
         F: torch.Tensor,
         local_model: LocalModel,
-        layer: int,
+        layer_idx: int,
         top_k_tokens: int = 30,
         mode: str = "mlp",
 ) -> Dict[int, Dict[str, Any]]:
     """
     Analyze features by projecting to vocabulary (unsupervised).
 
-    Fixed for Gemma 2 architecture access.
+    Args:
+        F (torch.Tensor): The feature matrix of shape (d, rank) from SNMF, where d hidden dimension
+                          and rank is the number of latent features.
+                          F[i, j] represents the contribution of feature j to the i-th hidden dimension.
+        local_model (LocalModel): The loaded model containing the tokenizer and architecture.
+        layer_idx (int): The layer number corresponding to the features in F.
+        top_k_tokens (int): Number of top tokens to retrieve for each feature projection.
+        mode (str): Determines how to interpret the features. Options:
+            - "mlp_intermediate": Projects the feature through the MLP down-projection and post-FFN layer norm.
+            - "mlp": Projects the feature directly through the post-FFN layer norm.
+            - "residual": Projects the raw feature vector as a residual without MLP transformations.
     """
-    print(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
+    print(f"Analyzing features (unsupervised vocab projection, layer {layer_idx}, mode={mode})...")
     d_feat, rank = F.shape
     device = local_model.device
     feature_analysis = {}
@@ -153,11 +163,12 @@ def analyze_features_unsupervised(
     with torch.no_grad():
         for feature_idx in range(rank):
             feature_vec = F[:, feature_idx].to(device)
+            layer = base_model.layers[layer]
             if mode == "mlp_intermediate":
-                down_proj = base_model.layers[layer].mlp.down_proj
+                down_proj = layer.mlp.down_proj
                 residual_vec = down_proj(feature_vec.unsqueeze(0)).squeeze(0)
                 try:
-                    post_ff_ln = base_model.layers[layer].post_feedforward_layernorm
+                    post_ff_ln = layer.post_feedforward_layernorm
                     concept_vector = post_ff_ln(residual_vec.unsqueeze(0)).squeeze(0)
                 except AttributeError:
                     concept_vector = residual_vec
@@ -165,7 +176,7 @@ def analyze_features_unsupervised(
                 neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
             elif mode == "mlp":
                 try:
-                    post_ff_ln = base_model.layers[layer].post_feedforward_layernorm
+                    post_ff_ln = layer.post_feedforward_layernorm
                     concept_vector = post_ff_ln(feature_vec.unsqueeze(0)).squeeze(0)
                 except AttributeError:
                     concept_vector = feature_vec
