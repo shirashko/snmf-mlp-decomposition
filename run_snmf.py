@@ -30,6 +30,11 @@ import torch
 from model_utils import LocalModel, load_local_model
 from activation_utils import LocalActivationGenerator
 from data_utils.concept_dataset import SupervisedConceptDataset
+from factorization.seminmf import NMFSemiNMF
+from experiments.snmf_interp.generate_vocab_proj import (
+    get_vocab_proj_gemma_hf,
+    get_vocab_proj_residual_hf,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -67,8 +72,6 @@ def run_snmf(
     Returns:
         (F, G) matrices where A ≈ F @ G.T
     """
-    # Import SNMF from the vendored package
-    from factorization.seminmf import NMFSemiNMF
 
     print(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
     print(f"  Input shape: {activations.shape}")
@@ -93,9 +96,6 @@ def run_snmf(
     return F, G
 
 
-# ------------------------------
-# Feature Analysis (Supervised - with labels)
-# ------------------------------
 def analyze_features_supervised(
         G: torch.Tensor,
         labels: List[str],
@@ -196,17 +196,6 @@ def analyze_features_supervised(
         print(f"  {concept}: features {features}")
 
     return feature_analysis
-
-
-# ------------------------------
-# Feature Analysis (Unsupervised - vocab projection)
-# Uses functions from SNMF repo: src/snmf-mlp-decomposition/experiments/snmf_interp/generate_vocab_proj.py
-# ------------------------------
-from experiments.snmf_interp.generate_vocab_proj import (
-    get_concept_vector_gemma_hf,
-    get_vocab_proj_gemma_hf,
-    get_vocab_proj_residual_hf,
-)
 
 
 def analyze_features_unsupervised(
@@ -420,18 +409,16 @@ def main():
     # Generate activations
     act_gen = LocalActivationGenerator(model, data_device="cpu", mode=args.mode)
     activations_per_layer, token_ids, sample_ids = act_gen.generate_activations(
-        prompts, layers, batch_size=args.batch_size
+        prompts=prompts, layers=layers, batch_size=args.batch_size
     )
 
-    # Run SNMF for each layer
+    # Run SNMF on each layer
     all_results = {}
-
     for layer_idx, layer in enumerate(layers):
         print(f"\n--- Layer {layer} ---")
 
         activations = activations_per_layer[layer_idx]
 
-        # Run SNMF
         F, G = run_snmf(
             activations,
             rank=args.rank,
