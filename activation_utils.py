@@ -2,6 +2,7 @@ import torch
 from tqdm import tqdm
 from typing import List, Tuple, Dict
 from contextlib import contextmanager
+import sys
 
 
 class LocalActivationGenerator:
@@ -55,7 +56,7 @@ class LocalActivationGenerator:
 
         with torch.inference_mode():
             with self._register_hooks(layers, mlp_storage):
-                for batch_idx in tqdm(range(num_batches), desc="Processing Batches"):
+                for batch_idx in tqdm(range(num_batches), desc="Processing Batches", file=sys.stdout):
                     start, end = batch_idx * batch_size, min((batch_idx + 1) * batch_size, len(prompts))
 
                     encoded = self.tokenizer(
