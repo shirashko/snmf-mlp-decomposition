@@ -1,9 +1,7 @@
 import argparse
 import json
-import random
 from pathlib import Path
 from typing import List, Tuple
-import numpy as np
 import torch
 from model_utils import  load_local_model
 from activation_utils import LocalActivationGenerator
@@ -11,7 +9,7 @@ from data_utils.concept_dataset import SupervisedConceptDataset
 from factorization.seminmf import NMFSemiNMF
 from dotenv import load_dotenv
 import os
-from tqdm import tqdm
+from utils import set_seed, resolve_device
 
 load_dotenv()
 hf_token = os.getenv("HF_TOKEN")
@@ -38,13 +36,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k-analysis", type=int, default=20)
     parser.add_argument("--dominance-threshold", type=float, default=0.5)
     return parser.parse_args()
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def parse_int_list(spec: str) -> List[int]:
@@ -101,11 +92,7 @@ def main():
 
     set_seed(args.seed)
 
-    device = args.device or (
-        "cuda" if torch.cuda.is_available() else
-        "mps" if torch.backends.mps.is_available() else
-        "cpu"
-    )
+    device = resolve_device(args.device)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
