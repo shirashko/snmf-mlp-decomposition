@@ -29,6 +29,7 @@ import numpy as np
 import torch
 from model_utils import LocalModel, load_local_model
 from activation_utils import LocalActivationGenerator
+from data_utils.concept_dataset import SupervisedConceptDataset
 
 
 def set_seed(seed: int) -> None:
@@ -38,30 +39,6 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def load_concept_dataset(data_path: str) -> Tuple[List[str], List[str]]:
-    """
-    Load concept dataset in SNMF format.
-
-    Returns:
-        (prompts, labels) - Lists of prompts and their concept labels
-    """
-    print(f"Loading dataset from {data_path}...")
-
-    with open(data_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    prompts = []
-    labels = []
-
-    for concept, texts in data.items():
-        for text in texts:
-            prompts.append(text)
-            labels.append(concept)
-
-    print(f"Loaded {len(prompts)} samples across {len(data)} concepts")
-    return prompts, labels
 
 
 def run_snmf(
@@ -400,7 +377,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Parse layers
     layers = parse_layers(args.layers)
 
     device = args.device or (
@@ -425,11 +401,17 @@ def main():
     print(f"  Device: {device}")
     print("=" * 60)
 
-    # Load model
-    model = load_local_model(args.model_path, device=device)
+    model = load_local_model(model_path=args.model_path, device=device)
 
-    # Load dataset
-    prompts, labels = load_concept_dataset(args.data_path)
+    dataset = SupervisedConceptDataset(args.data_path)
+
+    # Get the list of tuples [(prompt1, label1), (prompt2, label2), ...]
+    data = dataset.get_data()
+    # Unzip the list of tuples into two separate lists
+    prompts, labels = zip(*data)
+    # Convert back to lists (since zip returns tuples)
+    prompts = list(prompts)
+    labels = list(labels)
 
     # Generate activations
     act_gen = LocalActivationGenerator(model, data_device="cpu", mode=args.mode)

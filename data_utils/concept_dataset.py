@@ -122,3 +122,12 @@ class SupervisedConceptDataset:
             prompts, labels = zip(*batch) if batch else ([], [])
             batches.append({'prompt': list(prompts), 'label': list(labels)})
         return batches
+
+    def get_data(self) -> List[Tuple[str, str]]:
+        """
+        Get the entire dataset as a list of (prompt, label) tuples.
+
+        Returns:
+            List[Tuple[str, str]]: The dataset as a list of (prompt, label) pairs.
+        """
+        return self.data
