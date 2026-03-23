@@ -11,63 +11,12 @@ from data_utils.concept_dataset import SupervisedConceptDataset
 from factorization.seminmf import NMFSemiNMF
 from dotenv import load_dotenv
 import os
+from tqdm import tqdm
 
 load_dotenv()
 hf_token = os.getenv("HF_TOKEN")
 if hf_token:
     os.environ["HF_TOKEN"] = hf_token
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-def run_snmf(
-        activations: torch.Tensor,
-        rank: int,
-        device: str = "cpu",
-        sparsity: float = 0.01,
-        max_iter: int = 5000,
-        patience: int = 300,
-        init: str = "svd",
-        normalize: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    print(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
-    print(f"  Input shape: {activations.shape}")
-
-    # Optional: normalize activations (helps with intermediate MLP)
-    if normalize:
-        norms = activations.norm(dim=1, keepdim=True).clamp_min(1e-8)
-        activations = activations / norms
-
-    # SNMF expects (d_features, n_samples), so transpose
-    A = activations.T.to(device)
-
-    nmf = NMFSemiNMF(rank, fitting_device=device, sparsity=sparsity)
-    nmf.fit(A, max_iter=max_iter, patience=patience, verbose=True, init=init)
-
-    F = nmf.F_.detach().cpu()  # (d_features, rank)
-    G = nmf.G_.detach().cpu()  # (n_samples, rank)
-
-    print(f"  F shape: {F.shape}, G shape: {G.shape}")
-
-    return F, G
-
-def parse_int_list(spec: str) -> List[int]:
-    """
-    Parse '0,1,2' or '0-3' or '0,2,5-7' into a list of ints.
-    """
-    out = []
-    for chunk in spec.split(','):
-        chunk = chunk.strip()
-        if '-' in chunk:
-            a, b = chunk.split('-', 1)
-            out.extend(range(int(a), int(b) + 1))
-        elif chunk:
-            out.append(int(chunk))
-    return sorted(set(out))
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,15 +39,65 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dominance-threshold", type=float, default=0.5)
     return parser.parse_args()
 
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def parse_int_list(spec: str) -> List[int]:
+    """
+    Parse '0,1,2' or '0-3' or '0,2,5-7' into a list of ints.
+    """
+    out = []
+    for chunk in spec.split(','):
+        chunk = chunk.strip()
+        if '-' in chunk:
+            a, b = chunk.split('-', 1)
+            out.extend(range(int(a), int(b) + 1))
+        elif chunk:
+            out.append(int(chunk))
+    return sorted(set(out))
+
+
+def run_snmf(
+        activations: torch.Tensor,
+        rank: int,
+        device: str = "cpu",
+        sparsity: float = 0.01,
+        max_iter: int = 5000,
+        patience: int = 300,
+        init: str = "svd",
+        normalize: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    print(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
+    print(f"  Input shape: {activations.shape}")
+
+    # Optional: normalize activations (helps with intermediate MLP)
+    if normalize:
+        norms = activations.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        activations = activations / norms
+
+    # SNMF expects (d_features, n_samples), so transpose
+    activation_matrix = activations.T.to(device)
+
+    nmf = NMFSemiNMF(rank, fitting_device=device, sparsity=sparsity)
+    nmf.fit(activation_matrix, max_iter=max_iter, patience=patience, verbose=True, init=init)
+
+    feature_matrix = nmf.F_.detach().cpu()  # (d_features, rank)
+    coefficient_matrix = nmf.G_.detach().cpu()  # (n_samples, rank)
+
+    print(f"  F shape: {feature_matrix.shape}, G shape: {coefficient_matrix.shape}")
+
+    return feature_matrix, coefficient_matrix
+
+
+
 def main():
     args = parse_args()
     layers = parse_int_list(args.layers)
-
-    device = args.device or (
-        "cuda" if torch.cuda.is_available() else
-        "mps" if torch.backends.mps.is_available() else
-        "cpu"
-    )
 
     set_seed(args.seed)
 
@@ -110,7 +109,6 @@ def main():
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Extraction Phase
     model = load_local_model(model_path=args.model_path, device=device)
     tokenizer = model.tokenizer # Keep reference for saving
 
@@ -134,7 +132,7 @@ def main():
         print(f"\n--- Layer {layer} ---")
         activations = activations_per_layer[layer_idx]
 
-        F, G = run_snmf(
+        feature_matrix, coefficient_matrix = run_snmf(
             activations,
             rank=args.rank,
             device=device,
@@ -149,8 +147,8 @@ def main():
 
         # Save everything for independent analysis later
         torch.save({
-            'F': F,
-            'G': G,
+            'F': feature_matrix,
+            'G': coefficient_matrix,
             'token_ids': token_ids,
             'sample_ids': sample_ids,
             'labels': labels,
@@ -159,7 +157,7 @@ def main():
             'mode': args.mode
         }, layer_output / "snmf_factors.pt")
 
-        all_results[layer] = {'F_shape': list(F.shape), 'G_shape': list(G.shape)}
+        all_results[layer] = {'F_shape': list(feature_matrix.shape), 'G_shape': list(coefficient_matrix.shape)}
 
     with open(output_dir / "config.json", 'w') as f:
         json.dump(vars(args), f, indent=2)
