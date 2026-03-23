@@ -1,217 +1,126 @@
 import argparse
 import json
-import pandas as pd
-
+import os
+import google.generativeai as gai
 import torch
-from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
-torch.serialization.add_safe_globals([GemmaTokenizerFast])
+from tqdm import tqdm
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any
-from collections import Counter
+from typing import List, Optional
 from dotenv import load_dotenv
+import time
+from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
+torch.serialization.add_safe_globals([GemmaTokenizerFast])
 
 from utils import resolve_device, set_seed
-from model_utils import load_local_model, LocalModel
-from experiments.snmf_interp.generate_vocab_proj import (
-    get_vocab_proj_gemma_hf,
-    get_vocab_proj_residual_hf,
-)
+from model_utils import load_local_model
+from supervised_analysis import analyze_features_supervised
+from unsupervised_analysis import analyze_features_unsupervised
+from data_utils.concept_dataset import SupervisedConceptDataset
 
 load_dotenv()
-
-
-def analyze_features_supervised(
-        feature_acts: torch.Tensor,
-        labels: List[str],
-        sample_ids: List[int],
-        token_ids: List[int],
-        tokenizer,
-        top_k: int = 20,
-        dominance_threshold: float = 0.5,
-        save_raw: bool = True,
-) -> Dict[int, Dict[str, Any]]:
-    """
-    Performs semantic profiling of latent features by aligning peak activations
-    with supervised ground-truth metadata.
-
-    This analysis quantifies the 'monosemanticity' of learned dictionary elements.
-    For each latent feature, we extract the top-k activating tokens ('exemplars')
-    and map them back to their source samples to retrieve semantic labels.
-
-    We calculate:
-    1. Purity Score: The maximum probability of a single concept within the top-k exemplars.
-    2. Label Entropy: A measure of polysemanticity (higher entropy indicates a feature
-       representing multiple unrelated concepts).
-    3. Activation Statistics: The distributional properties of the feature across the corpus.
-
-    Args:
-        feature_acts (torch.Tensor): Activation matrix of shape (n_tokens, n_latents).
-        labels (List[str]): Ground-truth concept labels for each sample in the dataset.
-            Shape: (n_samples,).
-        sample_ids (List[int]): A mapping from token index to its parent sample index.
-            Used to resolve the semantic context of individual activations.
-            Shape: (n_tokens,).
-        token_ids (List[int]): Integer IDs for each token in the activation trace.
-        tokenizer: The model's tokenizer used for decoding exemplar tokens into text.
-        top_k (int): Number of maximal activations (exemplars) used to profile each latent.
-        dominance_threshold (float): The purity cutoff (0.0-1.0). Latents below this
-            threshold are categorized as 'polysemantic'.
-        save_raw (bool): If True, includes the raw activation magnitudes and decoded
-            exemplar tokens for manual inspection.
-
-    Returns:
-        Dict[int, Dict[str, Any]]: A dictionary where each key is a latent index
-            mapping to its semantic profile (dominant concept, purity, entropy, etc.).
-    """
-    print(f"Profiling latents (supervised, threshold={dominance_threshold})...")
-
-    n_tokens, n_latents = feature_acts.shape
-    sample_ids_arr = np.array(sample_ids)
-    labels_arr = np.array(labels)
-    token_metadata = labels_arr[sample_ids_arr]
-
-    feature_profiles = {}
-    feature_acts_np = feature_acts.detach().cpu().numpy()
-
-    for latent_idx in range(n_latents):
-        latent_activations = feature_acts_np[:, latent_idx]
-
-        # Identify top exemplars
-        top_indices = np.argsort(latent_activations)[-top_k:][::-1]
-        exemplar_labels = token_metadata[top_indices]
-        exemplar_magnitudes = latent_activations[top_indices]
-
-        # 3. Statistical Profiling
-        semantic_counts = Counter(exemplar_labels)
-        most_frequent_concept, frequent_concept_count = semantic_counts.most_common(1)[0]
-        dominance_ratio = frequent_concept_count / top_k
-
-        # Calculate Label Entropy (higher = more polysemantic)
-        probs = np.array(list(semantic_counts.values())) / top_k
-        entropy = -np.sum(probs * np.log2(probs + 1e-9))
-
-        assigned_concept = most_frequent_concept if dominance_ratio >= dominance_threshold else "polysemantic"
-
-        profile = {
-            'dominant_concept': assigned_concept,
-            'purity_score': round(float(dominance_ratio), 3),
-            'entropy': round(float(entropy), 3),
-            'concept_distribution': dict(semantic_counts),
-            'activation_stats': {
-                'mean': round(float(np.mean(latent_activations)), 3),
-                'max': round(float(np.max(latent_activations)), 3),
-                'std': round(float(np.std(latent_activations)), 3)
-            }
-        }
-
-        if save_raw:
-            top_tids = [token_ids[i] for i in top_indices]
-            profile['raw_evidence'] = {
-                'tokens': tokenizer.batch_decode([[tid] for tid in top_tids]),
-                'magnitudes': np.round(exemplar_magnitudes, 3).tolist(),
-                'labels': exemplar_labels.tolist(),
-                'sample_ids': sample_ids_arr[top_indices].tolist()
-            }
-
-        feature_profiles[latent_idx] = profile
-
-    # Summary Output
-    concept_map = {}
-    for idx, p in feature_profiles.items():
-        concept = p['dominant_concept']
-        concept_map.setdefault(concept, []).append(idx)
-
-    print("\nLatent-to-Concept Summary:")
-    for concept, indices in sorted(concept_map.items()):
-        print(
-            f"  {concept:25} | Latents: {len(indices):3} | Indices: {indices[:10]}{'...' if len(indices) > 10 else ''}")
-
-    return feature_profiles
-
-
-def analyze_features_unsupervised(
-        F: torch.Tensor,
-        local_model: LocalModel,
-        layer: int,
-        top_k_tokens: int = 30,
-        mode: str = "mlp",
-) -> Dict[int, Dict[str, Any]]:
-    """
-    Projects latent features into the vocabulary space using Logit Lens.
-
-    This identifies the semantic 'direction' of each feature by observing which tokens
-    it promotes or suppresses in the model's output distribution.
-
-    Args:
-        F (torch.Tensor): The feature matrix of shape (d, rank) from SNMF, where d hidden dimension
-                          and rank is the number of latent features.
-                          F[i, j] represents the contribution of feature j to the i-th hidden dimension.
-        local_model (LocalModel): The loaded model containing the tokenizer and architecture.
-        layer (int): The layer number corresponding to the features in F.
-        top_k_tokens (int): Number of top tokens to retrieve for each feature projection.
-        mode (str): Determines how to interpret the features. Options:
-            - "mlp_intermediate": Projects the feature through the MLP down-projection and post-FFN layer norm.
-            - "mlp": Projects the feature directly through the post-FFN layer norm.
-            - "residual": Projects the raw feature vector as a residual without MLP transformations.
-    """
-    print(f"Analyzing features (unsupervised, layer {layer}, mode={mode})...")
-    d_feat, rank = F.shape
-    device = local_model.device
-    hf_model = local_model.model
-    tokenizer = local_model.tokenizer
-    base_model = getattr(hf_model, "model", hf_model)
-    layer_obj = base_model.layers[layer]
-
-    feature_analysis = {}
-
-    with torch.no_grad():
-        for feature_idx in range(rank):
-            feature_vec = F[:, feature_idx].to(device)
-
-            # Transform feature based on the chosen mode
-            if mode == "mlp_intermediate":
-                # Project from d_mlp back to d_model
-                concept_vector = layer_obj.mlp.down_proj(feature_vec.unsqueeze(0)).squeeze(0)
-            elif mode == "mlp":
-                concept_vector = feature_vec
-            else:
-                concept_vector = None  # Residual case
-
-            # Apply LayerNorm if applicable (Gemma 2 specific)
-            if concept_vector is not None:
-                ln_layer = getattr(layer_obj, "post_feedforward_layernorm", None)
-                if ln_layer:
-                    concept_vector = ln_layer(concept_vector.unsqueeze(0)).squeeze(0)
-
-            # Vocabulary Projection
-            if mode in ["mlp_intermediate", "mlp"]:
-                pos_vals, pos_idx = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
-                neg_vals, neg_idx = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
-            else:
-                pos_vals, pos_idx = get_vocab_proj_residual_hf(feature_vec, hf_model, top_k_tokens, device)
-                neg_vals, neg_idx = get_vocab_proj_residual_hf(-feature_vec, hf_model, top_k_tokens, device)
-
-            # Combining both positive and negative for a single batch call
-            all_indices = torch.cat([pos_idx, neg_idx]).tolist()
-            all_tokens = tokenizer.batch_decode([[i] for i in all_indices])
-
-            pos_tokens = all_tokens[:top_k_tokens]
-            neg_tokens = all_tokens[top_k_tokens:]
-
-            feature_analysis[feature_idx] = {
-                'positive_tokens': pos_tokens,
-                'positive_logits': pos_vals.cpu().tolist(),
-                'negative_tokens': neg_tokens,
-                'negative_logits': (-neg_vals).cpu().tolist(),
-                'interpretation': f"Top promotes: {', '.join(pos_tokens[:5])}",
-            }
-
-    return feature_analysis
 
 def _interpret_tokens(tokens: List[str]) -> str:
     tokens_str = ", ".join([f'"{t}"' for t in tokens[:5]])
     return f"Top tokens: {tokens_str}"
+
+
+def extract_context_samples(latent_activations, token_ids, sample_ids, tokenizer, prompts, mass_threshold=0.9,
+                            max_samples=15):
+    sorted_idx = np.argsort(latent_activations)[::-1]
+    sorted_acts = latent_activations[sorted_idx]
+
+    cumulative_mass = np.cumsum(sorted_acts) / np.sum(sorted_acts)
+
+    threshold_idx = np.searchsorted(cumulative_mass, mass_threshold)
+    top_indices = sorted_idx[:min(threshold_idx + 1, max_samples)]
+
+    contexts = []
+    for idx in top_indices:
+        s_id = sample_ids[idx]
+        t_str = tokenizer.decode([token_ids[idx]])
+        full_context = prompts[s_id] if s_id < len(prompts) else "Context missing"
+        contexts.append(f"Token: '{t_str}' | Context: {full_context}")
+
+    return contexts
+
+
+class SimpleGeminiClient:
+    def __init__(self, model_name: str = "models/gemini-2.5-flash", max_retries: int = 3, sleep_seconds: float = 5.0):
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_TOKEN") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("No Gemini API key found. Please set GOOGLE_API_KEY or GEMINI_API_TOKEN.")
+        gai.configure(api_key=api_key)
+        self.model = gai.GenerativeModel(model_name)
+        self.max_retries = max_retries
+        self.sleep_seconds = sleep_seconds
+
+    def generate(self, prompt: str) -> str:
+        last_err: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                resp = self.model.generate_content(prompt)
+                if not resp.candidates: raise RuntimeError("No candidates returned from Gemini.")
+                text = getattr(resp, "text", None)
+                if not isinstance(text, str) or not text.strip():
+                    parts = getattr(getattr(resp.candidates[0], "content", None), "parts", None)
+                    if parts: text = "\n".join(
+                        [getattr(p, "text", "") for p in parts if getattr(p, "text", "").strip()])
+                if not isinstance(text, str) or not text.strip(): raise RuntimeError("Gemini returned empty text.")
+                return text.strip()
+            except Exception as e:
+                last_err = e
+                err_msg = str(e).lower()
+
+                if "429" in err_msg or "quota" in err_msg:
+                    wait_time = 60
+                    print(
+                        f"\n[Gemini] Rate limit hit (429). Sleeping for {wait_time}s before retry {attempt}/{self.max_retries}...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"\n[Gemini] error {e}, attempt {attempt}/{self.max_retries}")
+                    if attempt < self.max_retries:
+                        time.sleep(self.sleep_seconds)
+        raise RuntimeError(f"Gemini failed after {self.max_retries} attempts: {last_err}")
+
+
+def generate_llm_label_and_test_cases(client, contexts):
+    """
+    Sends the top activating contexts to a language model to generate:
+    1. A concise semantic label for the feature.
+    2. 5 synthetic sentences that should activate this feature strongly.
+    3. 5 neutral sentences that should not activate this feature.
+    4. A boolean indicating if the feature is mathematical in nature.
+    """
+    prompt = f"""
+    You are an expert in Mechanistic Interpretability. I will provide you with a list of contexts 
+    where a specific latent feature in a language model activates strongly. 
+
+    Contexts:
+    {chr(10).join(contexts)}
+
+    Based on these contexts:
+    1. Provide a concise semantic LABEL for this feature.
+    2. Generate 5 synthetic sentences that SHOULD activate this feature strongly.
+    3. Generate 5 neutral sentences that SHOULD NOT activate this feature.
+    4. Set "is_mathematical" to true if the feature relates to arithmetic, logic, or numbers.
+
+    Return ONLY a JSON object:
+    {{
+        "label": "string",
+        "is_mathematical": boolean,
+        "activating_test_cases": ["str1", "str2", ...],
+        "neutral_test_cases": ["str1", "str2", ...]
+    }}
+    """
+
+    response_text = client.generate(prompt)
+    try:
+        clean_json = response_text.strip().strip('`').replace('json', '')
+        return json.loads(clean_json)
+    except:
+        return {"error": "Failed to parse LLM response"}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze pre-trained SNMF results.")
@@ -224,6 +133,9 @@ def main():
     parser.add_argument("--save-raw", action="store_true", help="Include raw token data in output")
     parser.add_argument("--top-k-unsupervised", type=int, default=30)
     parser.add_argument("--top-k-supervised", type=int, default=20)
+    parser.add_argument("--run-llm", action="store_true", help="Run Gemini to refine labels")
+    parser.add_argument("--mass-threshold", type=float, default=0.9, help="Cumulative activation mass for context")
+    parser.add_argument("--data-path", type=str, help="Path to data.json to load original prompts")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -252,8 +164,6 @@ def main():
             G, labels, sample_ids, token_ids, local_model.tokenizer,
             dominance_threshold=args.dominance_threshold, save_raw=args.save_raw, top_k=args.top_k_supervised
         )
-        with open(layer_folder / "feature_analysis_supervised.json", 'w') as f:
-            json.dump(supervised_results, f, indent=2)
 
         if not args.skip_vocab:
             unsupervised_results = analyze_features_unsupervised(
@@ -266,7 +176,55 @@ def main():
             with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
                 json.dump(unsupervised_results, f, indent=2)
 
+        if args.run_llm:
+            if not args.data_path:
+                raise ValueError("Must provide --data-path when using --run-llm to extract contexts.")
+
+            gemini_client = SimpleGeminiClient()
+            dataset = SupervisedConceptDataset(args.data_path)
+            data = dataset.get_data()
+            prompts, _ = zip(*data)
+            original_prompts = list(prompts)
+
+            print(f"Refining labels with Gemini for Layer {layer_num}...")
+
+            for latent_idx in tqdm(range(G.shape[1]), desc="LLM Profiling"):
+                profile = supervised_results[latent_idx]
+                is_math_candidate = any(kw in profile['dominant_concept'] for kw in ["riddle", "symbolic", "math"])
+                is_high_purity = profile['purity_score'] > 0.7
+
+                if is_math_candidate or is_high_purity:
+                    contexts = extract_context_samples(
+                        G[:, latent_idx].numpy(),
+                        token_ids,
+                        sample_ids,
+                        local_model.tokenizer,
+                        original_prompts,
+                        mass_threshold=args.mass_threshold
+                    )
+
+                    llm_profile = generate_llm_label_and_test_cases(gemini_client, contexts)
+                    supervised_results[latent_idx]['llm_refined_profile'] = llm_profile
+
+                    # API (15 RPM -> 4s per request)
+                    # Delay to avoid hitting Gemini's rate limits (15 requests per minute for many models)
+                    time.sleep(4)
+                else:
+                    supervised_results[latent_idx]['llm_refined_profile'] = {"label": "skipped (low relevance)"}
+
+                with open(layer_folder / "feature_analysis_supervised.json", 'w') as f:
+                    json.dump(supervised_results, f, indent=2)
+
     print(f"\nAnalysis complete. Files saved in {args.results_dir}")
 
 if __name__ == "__main__":
     main()
+
+
+"""
+python analyze_snmf_results.py \
+    --model-path "models/gemma2-2.03B_best_unlearn_model" \
+    --results-dir "./test_output" \
+    --dominance-threshold 0.5 \
+    --save-raw
+"""

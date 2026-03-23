@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
-    parser.add_argument("--layers", type=str, default="0")
+    parser.add_argument("--layers", type=str, required=True)
     parser.add_argument("--rank", type=int, default=50)
     parser.add_argument("--sparsity", type=float, default=0.01)
     parser.add_argument("--init", type=str, default="random")
@@ -153,3 +153,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+"""
+python train_snmf.py \
+    --model-path "models/gemma2-2.03B_best_unlearn_model" \
+    --data-path "data/data_subsampled.json" \
+    --layers "0-5" \
+    --init "svd" \
+    --rank 200 \
+    --max-iter 5000 \
+    --output-dir "./test_output"
+"""
