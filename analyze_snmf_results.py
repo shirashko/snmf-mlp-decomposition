@@ -8,10 +8,11 @@ torch.serialization.add_safe_globals([GemmaTokenizerFast])
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
-from model_utils import load_local_model, LocalModel
+from collections import Counter
 from dotenv import load_dotenv
-from utils import resolve_device, set_seed
 
+from utils import resolve_device, set_seed
+from model_utils import load_local_model, LocalModel
 from experiments.snmf_interp.generate_vocab_proj import (
     get_vocab_proj_gemma_hf,
     get_vocab_proj_residual_hf,
@@ -19,8 +20,9 @@ from experiments.snmf_interp.generate_vocab_proj import (
 
 load_dotenv()
 
+
 def analyze_features_supervised(
-        coefficient_matrix: torch.Tensor,
+        feature_acts: torch.Tensor,
         labels: List[str],
         sample_ids: List[int],
         token_ids: List[int],
@@ -30,87 +32,103 @@ def analyze_features_supervised(
         save_raw: bool = True,
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Analyze what concepts each SNMF feature captures using labeled data.
+    Performs semantic profiling of latent features by aligning peak activations
+    with supervised ground-truth metadata.
+
+    This analysis quantifies the 'monosemanticity' of learned dictionary elements.
+    For each latent feature, we extract the top-k activating tokens ('exemplars')
+    and map them back to their source samples to retrieve semantic labels.
+
+    We calculate:
+    1. Purity Score: The maximum probability of a single concept within the top-k exemplars.
+    2. Label Entropy: A measure of polysemanticity (higher entropy indicates a feature
+       representing multiple unrelated concepts).
+    3. Activation Statistics: The distributional properties of the feature across the corpus.
 
     Args:
-        coefficient_matrix: Activation weights matrix (n_tokens, rank)
-        labels: List of concept labels for each sample, size coefficient_matrix.shape[0]
-        sample_ids: Mapping from token index to sample index, size coefficient_matrix.shape[0]
-        token_ids: Token IDs for each activation, size coefficient_matrix.shape[0]
-        tokenizer: Tokenizer for decoding token IDs
-        top_k: Number of top activating tokens to analyze
-        dominance_threshold: Minimum percentage (0.0-1.0) to assign dominant concept.
-                            If no concept exceeds this, labeled as "mixed".
-        save_raw: Whether to include raw token data in output
+        feature_acts (torch.Tensor): Activation matrix of shape (n_tokens, n_latents).
+        labels (List[str]): Ground-truth concept labels for each sample in the dataset.
+            Shape: (n_samples,).
+        sample_ids (List[int]): A mapping from token index to its parent sample index.
+            Used to resolve the semantic context of individual activations.
+            Shape: (n_tokens,).
+        token_ids (List[int]): Integer IDs for each token in the activation trace.
+        tokenizer: The model's tokenizer used for decoding exemplar tokens into text.
+        top_k (int): Number of maximal activations (exemplars) used to profile each latent.
+        dominance_threshold (float): The purity cutoff (0.0-1.0). Latents below this
+            threshold are categorized as 'polysemantic'.
+        save_raw (bool): If True, includes the raw activation magnitudes and decoded
+            exemplar tokens for manual inspection.
 
     Returns:
-        Dictionary mapping feature index to analysis results
+        Dict[int, Dict[str, Any]]: A dictionary where each key is a latent index
+            mapping to its semantic profile (dominant concept, purity, entropy, etc.).
     """
-    print(f"Analyzing features (supervised, threshold={dominance_threshold})...")
-    # coefficient_matrix represents the Activation Matrix in the latent space
-    n_tokens, features_count = coefficient_matrix.shape
+    print(f"Profiling latents (supervised, threshold={dominance_threshold})...")
 
-    # Map each token to its ground-truth semantic concept from the supervised
-    # metadata (like addition_symbolic, subtraction_riddle)
-    token_ground_truth_labels = [labels[sample_ids[i]] for i in range(n_tokens)]
+    n_tokens, n_latents = feature_acts.shape
+    sample_ids_arr = np.array(sample_ids)
+    labels_arr = np.array(labels)
+    token_metadata = labels_arr[sample_ids_arr]
 
     feature_profiles = {}
-    for feature_idx in range(features_count):
-        # Extract the activation for the specific latent feature across all tokens
-        latent_activations = coefficient_matrix[:, feature_idx].numpy()
+    feature_acts_np = feature_acts.detach().cpu().numpy()
 
-        # Identify the top-K 'exemplar' tokens that maximally excite this feature
+    for latent_idx in range(n_latents):
+        latent_activations = feature_acts_np[:, latent_idx]
+
+        # Identify top exemplars
         top_indices = np.argsort(latent_activations)[-top_k:][::-1]
-
-        # Retrieve the activation magnitudes and corresponding labels for the top exemplars
+        exemplar_labels = token_metadata[top_indices]
         exemplar_magnitudes = latent_activations[top_indices]
-        exemplar_labels = [token_ground_truth_labels[i] for i in top_indices]
 
-        # Compute the distribution of semantic concepts among top exemplars
-        semantic_counts = {}
-        for label in exemplar_labels:
-            semantic_counts[label] = semantic_counts.get(label, 0) + 1
+        # 3. Statistical Profiling
+        semantic_counts = Counter(exemplar_labels)
+        most_frequent_concept, frequent_concept_count = semantic_counts.most_common(1)[0]
+        dominance_ratio = frequent_concept_count / top_k
 
-        # Determine feature 'purity' or dominance based on the threshold
-        most_frequent_concept = max(semantic_counts, key=semantic_counts.get)
-        dominance_ratio = semantic_counts[most_frequent_concept] / len(exemplar_labels)
+        # Calculate Label Entropy (higher = more polysemantic)
+        probs = np.array(list(semantic_counts.values())) / top_k
+        entropy = -np.sum(probs * np.log2(probs + 1e-9))
 
         assigned_concept = most_frequent_concept if dominance_ratio >= dominance_threshold else "polysemantic"
 
-        result = {
+        profile = {
             'dominant_concept': assigned_concept,
-            'dominant_percentage': round(float(dominance_ratio),3),
-            'concept_distribution': semantic_counts,
-            'mean_activation': float(np.mean(latent_activations)),
-            'max_activation': float(np.max(latent_activations)),
-            'top_concepts': list(semantic_counts.keys())[:5],
+            'purity_score': round(float(dominance_ratio), 3),
+            'entropy': round(float(entropy), 3),
+            'concept_distribution': dict(semantic_counts),
+            'activation_stats': {
+                'mean': round(float(np.mean(latent_activations)), 3),
+                'max': round(float(np.max(latent_activations)), 3),
+                'std': round(float(np.std(latent_activations)), 3)
+            }
         }
 
         if save_raw:
-            top_token_ids = [token_ids[i] for i in top_indices]
-            top_token_texts = [tokenizer.decode([tid]) for tid in top_token_ids]
-            top_sample_ids = [sample_ids[i] for i in top_indices]
-            result['raw'] = {
-                'top_token_indices': top_indices.tolist(),
-                'top_token_ids': top_token_ids,
-                'top_token_texts': top_token_texts,
-                'top_activations': exemplar_magnitudes.tolist(),
-                'top_labels': exemplar_labels,
-                'top_sample_ids': top_sample_ids,
+            top_tids = [token_ids[i] for i in top_indices]
+            profile['raw_evidence'] = {
+                'tokens': tokenizer.batch_decode([[tid] for tid in top_tids]),
+                'magnitudes': np.round(exemplar_magnitudes, 3).tolist(),
+                'labels': exemplar_labels.tolist(),
+                'sample_ids': sample_ids_arr[top_indices].tolist()
             }
-        feature_profiles[feature_idx] = result
 
-    concept_features = {}
-    for feat_idx, profile in feature_profiles.items():
-        concept = profile['dominant_concept']
-        if concept not in concept_features:
-            concept_features[concept] = []
-        concept_features[concept].append(feat_idx)
+        feature_profiles[latent_idx] = profile
 
-    print("Feature-to-concept mapping (supervised):")
-    for concept, features in sorted(concept_features.items()):
-        print(f"  {concept}: features {features}")
+    # Summary Output
+    concept_map = {}
+    for idx, p in feature_profiles.items():
+        concept = p['dominant_concept']
+        concept_map.setdefault(concept, []).append(idx)
+
+    print("\nLatent-to-Concept Summary:")
+    for concept, indices in sorted(concept_map.items()):
+        print(
+            f"  {concept:25} | Latents: {len(indices):3} | Indices: {indices[:10]}{'...' if len(indices) > 10 else ''}")
+
     return feature_profiles
+
 
 def analyze_features_unsupervised(
         F: torch.Tensor,
@@ -185,6 +203,7 @@ def main():
     parser.add_argument("--skip-vocab", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save-raw", action="store_true", help="Include raw token data in output")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -211,7 +230,7 @@ def main():
 
         supervised_results = analyze_features_supervised(
             G, labels, sample_ids, token_ids, local_model.tokenizer,
-            dominance_threshold=args.dominance_threshold
+            dominance_threshold=args.dominance_threshold, save_raw=args.save_raw
         )
         with open(layer_folder / "feature_analysis_supervised.json", 'w') as f:
             json.dump(supervised_results, f, indent=2)
