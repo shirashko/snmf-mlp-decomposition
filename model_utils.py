@@ -24,7 +24,7 @@ def load_local_model(model_path: str, device: str = "cpu") -> LocalModel:
     )
     model.eval().to(device)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b")
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
