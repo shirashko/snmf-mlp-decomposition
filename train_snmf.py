@@ -25,15 +25,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layers", type=str, default="0")
     parser.add_argument("--rank", type=int, default=50)
     parser.add_argument("--sparsity", type=float, default=0.01)
-    parser.add_argument("--init", type=str, default="svd")
+    parser.add_argument("--init", type=str, default="random")
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--mode", type=str, default="mlp_intermediate")
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--max-iter", type=int, default=5000)
+    parser.add_argument("--max-iter", type=int, default=5_000)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-vocab-projection", action="store_true")
-    parser.add_argument("--top-k-analysis", type=int, default=20)
     parser.add_argument("--dominance-threshold", type=float, default=0.5)
     return parser.parse_args()
 
@@ -59,8 +58,8 @@ def run_snmf(
         device: str = "cpu",
         sparsity: float = 0.01,
         max_iter: int = 5000,
-        patience: int = 300,
-        init: str = "svd",
+        patience: int = 1500,
+        init: str = "random",
         normalize: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     print(f"Running SNMF with rank={rank}, sparsity={sparsity}, init={init}")
@@ -73,6 +72,7 @@ def run_snmf(
 
     # SNMF expects (d_features, n_samples), so transpose
     activation_matrix = activations.T.to(device)
+
 
     nmf = NMFSemiNMF(rank, fitting_device=device, sparsity=sparsity)
     nmf.fit(activation_matrix, max_iter=max_iter, patience=patience, verbose=True, init=init)
