@@ -331,6 +331,17 @@ def _interpret_tokens(tokens: List[str]) -> str:
     tokens_str = ", ".join([f'"{t}"' for t in tokens[:5]])
     return f"Top tokens: {tokens_str}"
 
+def parse_layers(layers_str: str) -> List[int]:
+    """Parse layer specification string into a list of layer indices."""
+    layers = []
+    for chunk in layers_str.split(','):
+        if '-' in chunk:
+            a, b = chunk.split('-')
+            layers.extend(range(int(a), int(b) + 1))
+        else:
+            layers.append(int(chunk))
+    return sorted(set(layers))
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -349,9 +360,9 @@ def main():
     parser.add_argument("--layers", type=str, default="0",
                         help="Layers to analyze (e.g., '0,1,2' or '0-5')")
     parser.add_argument("--rank", type=int, default=50,
-                        help="Number of SNMF factors/features (default: 50)")
+                        help="Number of features to discover (k)")
     parser.add_argument("--sparsity", type=float, default=0.01,
-                        help="SNMF sparsity parameter (default: 0.01)")
+                        help="SNMF sparsity parameter")
     parser.add_argument("--init", type=str, default="svd", choices=["random", "svd", "knn"],
                         help="SNMF initialization method (default: svd, more stable)")
     parser.add_argument("--normalize", action="store_true",
@@ -370,8 +381,7 @@ def main():
                         help="Maximum SNMF iterations")
     parser.add_argument("--device", type=str, default=None,
                         help="Device for computation (default: auto)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed")
+    parser.add_argument("--seed", type=int, default=42)
 
     # Analysis configuration
     parser.add_argument("--dominance-threshold", type=float, default=0.5,
@@ -391,14 +401,7 @@ def main():
     args = parser.parse_args()
 
     # Parse layers
-    layers = []
-    for chunk in args.layers.split(','):
-        if '-' in chunk:
-            a, b = chunk.split('-')
-            layers.extend(range(int(a), int(b) + 1))
-        else:
-            layers.append(int(chunk))
-    layers = sorted(set(layers))
+    layers = parse_layers(args.layers)
 
     device = args.device or (
         "cuda" if torch.cuda.is_available() else
