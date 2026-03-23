@@ -128,47 +128,37 @@ def analyze_features_unsupervised(
         mode: str = "mlp",
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Analyze features by projecting to vocabulary (unsupervised, like original SNMF repo).
+    Analyze features by projecting to vocabulary (unsupervised).
 
-    Mode determines the activation space:
-    - "mlp": Post-down_proj activations (d_model=320)
-    - "mlp_intermediate": Pre-down_proj activations (d_mlp=1280) - like original SNMF repo
-    - "residual": Hidden states (d_model=320)
-
-    Args:
-        F: Feature directions matrix
-           - For mlp/residual: (d_model, rank)
-           - For mlp_intermediate: (d_mlp, rank)
-        local_model: The loaded model container
-        layer: Which layer these features are from
-        top_k_tokens: Number of top vocabulary tokens to show
-        mode: "mlp", "mlp_intermediate", or "residual"
-
-    Returns:
-        Dictionary mapping feature index to vocab projection results
+    Fixed for Gemma 2 architecture access.
     """
     print(f"Analyzing features (unsupervised vocab projection, layer {layer}, mode={mode})...")
 
     d_feat, rank = F.shape
     device = local_model.device
-
     feature_analysis = {}
 
-    # Get the HuggingFace model for vocab projection
+    # Get the actual transformer backbone (Gemma2Model)
+    # hf_model is usually Gemma2ForCausalLM, which has a .model attribute
     hf_model = local_model.model
+    if hasattr(hf_model, "model"):
+        base_model = hf_model.model
+    else:
+        base_model = hf_model
 
     with torch.no_grad():
         for feature_idx in range(rank):
             feature_vec = F[:, feature_idx].to(device)
 
             if mode == "mlp_intermediate":
-                # Intermediate MLP activations (d_mlp=1280) - like original SNMF repo
-                # Need to: down_proj → post_ff_ln → final_norm → unembed
-                down_proj = hf_model.model.layers[layer].mlp.down_proj
-                residual_vec = down_proj(feature_vec.unsqueeze(0)).squeeze(0)  # (d_model,)
+                # Intermediate MLP activations (d_mlp=3072 in your logs)
+                # Pathway: down_proj -> post_ff_ln (if exists) -> final_norm -> unembed
+                down_proj = base_model.layers[layer].mlp.down_proj
+                residual_vec = down_proj(feature_vec.unsqueeze(0)).squeeze(0)
 
                 try:
-                    post_ff_ln = hf_model.model.layers[layer].post_feedforward_layernorm
+                    # Gemma 2 often uses post_feedforward_layernorm
+                    post_ff_ln = base_model.layers[layer].post_feedforward_layernorm
                     concept_vector = post_ff_ln(residual_vec.unsqueeze(0)).squeeze(0)
                 except AttributeError:
                     concept_vector = residual_vec
@@ -177,22 +167,22 @@ def analyze_features_unsupervised(
                 neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
 
             elif mode == "mlp":
-                # MLP output mode (post-down_proj, d_model=320)
-                # Need to: post_ff_ln → final_norm → unembed
+                # MLP output mode (post-down_proj, d_model=768)
                 try:
-                    post_ff_ln = hf_model.model.layers[layer].post_feedforward_layernorm
+                    post_ff_ln = base_model.layers[layer].post_feedforward_layernorm
                     concept_vector = post_ff_ln(feature_vec.unsqueeze(0)).squeeze(0)
                 except AttributeError:
                     concept_vector = feature_vec
 
                 pos_values, pos_indices = get_vocab_proj_gemma_hf(concept_vector, hf_model, top_k_tokens, device)
                 neg_values, neg_indices = get_vocab_proj_gemma_hf(-concept_vector, hf_model, top_k_tokens, device)
+
             else:
-                # Residual mode: feature is already in hidden space, just apply final norm and unembed
+                # Residual mode: feature is already in hidden space
                 pos_values, pos_indices = get_vocab_proj_residual_hf(feature_vec, hf_model, top_k_tokens, device)
                 neg_values, neg_indices = get_vocab_proj_residual_hf(-feature_vec, hf_model, top_k_tokens, device)
 
-            # Decode tokens
+            # Decode tokens using the tokenizer in the container
             pos_tokens = [local_model.tokenizer.decode([idx.item()]) for idx in pos_indices]
             neg_tokens = [local_model.tokenizer.decode([idx.item()]) for idx in neg_indices]
 
@@ -205,11 +195,9 @@ def analyze_features_unsupervised(
             }
 
     print("Feature vocabulary projections:")
-    for feat_idx in range(min(rank, 5)):  # Show first 5
+    for feat_idx in range(min(rank, 5)):
         tokens = feature_analysis[feat_idx]['positive_tokens'][:5]
         print(f"  Feature {feat_idx}: {tokens}")
-    if rank > 5:
-        print(f"  ... and {rank - 5} more features")
 
     return feature_analysis
 
@@ -268,7 +256,7 @@ def main():
         # 2. Unsupervised Analysis
         if not args.skip_vocab:
             unsupervised_results = analyze_features_unsupervised(
-                F, local_model.model, local_model.tokenizer, layer_num, mode
+                F=F, local_model=local_model.model, layer=layer_num, mode=mode
             )
             with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
                 json.dump(unsupervised_results, f, indent=2)
