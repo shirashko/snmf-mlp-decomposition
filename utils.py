@@ -104,12 +104,6 @@ def load_potential_feature_keys(
 # Model / Activation Extraction
 # ---------------------------------------------------------------------------
 
-def get_embedding_matrix(model) -> torch.Tensor:
-    if hasattr(model, "W_E") and torch.is_tensor(model.W_E): return model.W_E
-    if hasattr(model, "embed") and hasattr(model.embed, "W_E") and torch.is_tensor(
-        model.embed.W_E): return model.embed.W_E
-    raise RuntimeError("Could not locate token embedding matrix.")
-
 
 def get_special_token_ids(model) -> set:
     tok = model.tokenizer
@@ -181,89 +175,6 @@ def fit_with_ridge(nmf, A: torch.Tensor, max_iter: int, patience: int = 500, bas
             last_err = e
             reg *= 10.0
     raise RuntimeError(f"NMF failed after {tries} tries. Last error: {last_err}") from last_err
-
-
-# ---------------------------------------------------------------------------
-# Embedding Specific Stats
-# ---------------------------------------------------------------------------
-
-def build_token_label_codes(concept_name: str, dataset, tokenizer) -> Dict[int, int]:
-    special = set(getattr(tokenizer, "all_special_ids", []) or [])
-    origin = {}
-    for sent, lbl in dataset:
-        if not sent: continue
-        for tid in tokenizer(sent, add_special_tokens=False)["input_ids"]:
-            tid = int(tid)
-            if tid in special: continue
-            origin.setdefault(tid, set()).add(
-                "neutral" if lbl == "Neutral" else "concept" if lbl == concept_name else str(lbl))
-
-    token_to_code = {}
-    for tid, s in origin.items():
-        if "concept" in s and "neutral" in s:
-            token_to_code[tid] = 2
-        elif "concept" in s:
-            token_to_code[tid] = 1
-        else:
-            token_to_code[tid] = 0
-    return token_to_code
-
-
-def compute_embedding_stats(F_tok: torch.Tensor, vprime_token_ids: List[int], token_to_code: Dict[int, int],
-                            concept_name: str, nonzero_eps: float = 1e-12, ratio_eps: float = 1e-12) -> pd.DataFrame:
-    Vp, K = F_tok.shape
-    codes = np.zeros(Vp, dtype=np.int8)
-    for i, tid in enumerate(vprime_token_ids): codes[i] = token_to_code.get(tid, 0)
-    codes_t = torch.from_numpy(codes)
-
-    rows = []
-    for k in range(K):
-        w = F_tok[:, k].abs()
-        nz_mask = w > nonzero_eps
-        w_nz, c_nz = (w[nz_mask], codes_t[nz_mask]) if nz_mask.any() else (w.new_zeros((0,)), codes_t.new_zeros((0,)))
-
-        m_neu, m_con, m_both = (c_nz == 0), (c_nz == 1), (c_nz == 2)
-        mass_neu = float(w_nz[m_neu].sum()) if m_neu.any() else 0.0
-        mass_con = float(w_nz[m_con].sum()) if m_con.any() else 0.0
-
-        rows.append({
-            "concept": concept_name, "feature": k,
-            "num_concept": int(m_con.sum()), "num_neutral": int(m_neu.sum()), "num_both": int(m_both.sum()),
-            "mass_concept": mass_con, "mass_neutral": mass_neu,
-            "mass_both": float(w_nz[m_both].sum()) if m_both.any() else 0.0,
-            "mass_ratio_cn": (mass_con + ratio_eps) / (mass_neu + ratio_eps),
-        })
-    return pd.DataFrame(rows)
-
-
-def collect_feature_rows_for_embeddings(F_tok: torch.Tensor, vprime_token_ids: Sequence[int],
-                                        token_label_map: Dict[int, str], model, model_name: str, concept_name: str,
-                                        rank: int, max_activating: int = 200) -> List[Dict[str, Any]]:
-    n_vocabprime, K = F_tok.shape
-    token_strs = model.to_str_tokens(torch.tensor(list(vprime_token_ids), dtype=torch.long))
-    vprime_tok_strs = _safe_tokens([str(t[0][0]) if isinstance(t, list) and len(t) > 0 and isinstance(t[0],
-                                                                                                      list) else str(
-        t[0]) if isinstance(t, list) else str(t) for t in token_strs])
-
-    rows = []
-    for k in range(min(rank, K)):
-        col = F_tok[:, k]
-        nz = torch.where(col.abs() > 1e-12)[0].tolist()
-        nz_sorted = sorted(nz, key=lambda i: float(col.abs()[i]), reverse=True)[:max_activating] if len(nz) > 1 else nz
-
-        act_tokens = [vprime_tok_strs[i] for i in nz_sorted]
-        labels_list = [token_label_map.get(int(vprime_token_ids[i]), "Neutral") for i in nz_sorted]
-        frac = sum(1 for lab in labels_list if lab in (concept_name, "both")) / max(len(labels_list), 1)
-
-        rows.append({
-            "model": model_name, "concept": concept_name, "rank": min(rank, K), "feature": k,
-            "num_activating_tokens_all": len(nz), "activating_tokens": act_tokens, "labels": labels_list,
-            "num_concept_related": sum(1 for lab in labels_list if lab in (concept_name, "both")),
-            "is_concept_realted": bool(frac >= 0.7),
-            "projection_top_tokens": [], "projection_bottom_tokens": [], "projection_abs_top_tokens": []
-        })
-    return rows
-
 
 # ---------------------------------------------------------------------------
 # MLP Specific Stats
