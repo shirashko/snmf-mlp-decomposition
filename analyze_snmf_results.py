@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 from dotenv import load_dotenv
 import time
 from transformers.models.gemma.tokenization_gemma_fast import GemmaTokenizerFast
@@ -19,10 +19,6 @@ from unsupervised_analysis import analyze_features_unsupervised
 from data_utils.concept_dataset import SupervisedConceptDataset
 
 load_dotenv()
-
-def _interpret_tokens(tokens: List[str]) -> str:
-    tokens_str = ", ".join([f'"{t}"' for t in tokens[:5]])
-    return f"Top tokens: {tokens_str}"
 
 
 def extract_context_samples(latent_activations, token_ids, sample_ids, tokenizer, prompts, mass_threshold=0.9,
