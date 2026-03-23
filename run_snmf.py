@@ -449,7 +449,6 @@ def main():
         else:
             unsupervised_analysis = None
 
-        # Save layer results
         layer_output = output_dir / f"layer_{layer}"
         layer_output.mkdir(exist_ok=True)
 
@@ -460,11 +459,9 @@ def main():
             'sample_ids': sample_ids,
         }, layer_output / "snmf_factors.pt")
 
-        # Save supervised analysis
         with open(layer_output / "feature_analysis_supervised.json", 'w') as f:
             json.dump(supervised_analysis, f, indent=2)
 
-        # Save unsupervised analysis
         if unsupervised_analysis:
             with open(layer_output / "feature_analysis_unsupervised.json", 'w') as f:
                 json.dump(unsupervised_analysis, f, indent=2)
@@ -477,7 +474,6 @@ def main():
 
         print(f"  Saved to {layer_output}")
 
-    # Save overall config
     config = {
         'model_path': args.model_path,
         'data_path': args.data_path,
