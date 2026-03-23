@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", type=str, default="mlp_intermediate")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--max-iter", type=int, default=5000)
-    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-vocab-projection", action="store_true")
     parser.add_argument("--top-k-analysis", type=int, default=20)
