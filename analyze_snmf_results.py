@@ -126,12 +126,12 @@ def main():
     parser.add_argument("--skip-vocab", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save-raw", action="store_true", help="Include raw token data in output")
+    parser.add_argument("--save-raw", action="store_true")
+    parser.add_argument("--run-llm", action="store_true")
+    parser.add_argument("--mass-threshold", type=float, default=0.9)
+    parser.add_argument("--data-path", type=str)
     parser.add_argument("--top-k-unsupervised", type=int, default=30)
     parser.add_argument("--top-k-supervised", type=int, default=20)
-    parser.add_argument("--run-llm", action="store_true", help="Run Gemini to refine labels")
-    parser.add_argument("--mass-threshold", type=float, default=0.9, help="Cumulative activation mass for context")
-    parser.add_argument("--data-path", type=str, help="Path to data.json to load original prompts")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -141,6 +141,15 @@ def main():
     print(f"Loading model from {args.model_path}...")
     local_model = load_local_model(args.model_path, device=device)
 
+    gemini_client = SimpleGeminiClient() if args.run_llm else None
+    original_prompts = []
+
+    if args.run_llm:
+        if not args.data_path:
+            raise ValueError("Must provide --data-path for LLM profiling.")
+        dataset = SupervisedConceptDataset(args.data_path)
+        original_prompts = [item[0] for item in dataset.get_data()]
+
     for layer_folder in sorted(results_dir.glob("layer_*")):
         layer_num = int(layer_folder.name.split("_")[1])
         factors_path = layer_folder / "snmf_factors.pt"
@@ -149,9 +158,18 @@ def main():
             print(f"Skipping layer {layer_num} because it doesn't exist.")
             continue
 
+        output_json_path = layer_folder / "feature_analysis_supervised.json"
+
+        existing_results = {}
+        if output_json_path.exists():
+            try:
+                with open(output_json_path, 'r') as f:
+                    existing_results = json.load(f)
+            except Exception as e:
+                print(f"Warning: could not load existing JSON: {e}")
+
         print(f"\nProcessing {layer_folder.name}...")
         checkpoint = torch.load(factors_path, map_location="cpu", weights_only=False)
-
         F, G = checkpoint['F'], checkpoint['G']
         token_ids, sample_ids = checkpoint['token_ids'], checkpoint['sample_ids']
         labels, mode = checkpoint['labels'], checkpoint.get('mode', 'mlp_intermediate')
@@ -161,55 +179,51 @@ def main():
             dominance_threshold=args.dominance_threshold, save_raw=args.save_raw, top_k=args.top_k_supervised
         )
 
-        if not args.skip_vocab:
-            unsupervised_results = analyze_features_unsupervised(
-                F=F,
-                local_model=local_model,
-                layer=layer_num,
-                mode=mode,
-                top_k_tokens=args.top_k_unsupervised,
-            )
-            with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
-                json.dump(unsupervised_results, f, indent=2)
+        for k, v in existing_results.items():
+            idx = int(k)
+            if idx in supervised_results and 'llm_refined_profile' in v:
+                supervised_results[idx]['llm_refined_profile'] = v['llm_refined_profile']
 
         if args.run_llm:
-            if not args.data_path:
-                raise ValueError("Must provide --data-path when using --run-llm to extract contexts.")
-
-            gemini_client = SimpleGeminiClient()
-            dataset = SupervisedConceptDataset(args.data_path)
-            data = dataset.get_data()
-            prompts, _ = zip(*data)
-            original_prompts = list(prompts)
-
             print(f"Refining labels with Gemini for Layer {layer_num}...")
-
             for latent_idx in tqdm(range(G.shape[1]), desc="LLM Profiling"):
+
+                if latent_idx in supervised_results and 'llm_refined_profile' in supervised_results[latent_idx]:
+                    label = supervised_results[latent_idx]['llm_refined_profile'].get('label', '')
+                    if label and "skipped" not in label.lower():
+                        continue
+
                 profile = supervised_results[latent_idx]
-                is_math_candidate = any(kw in profile['dominant_concept'] for kw in ["riddle", "symbolic", "math"])
-                is_high_purity = profile['purity_score'] > 0.7
+                is_math = any(kw in profile['dominant_concept'] for kw in ["riddle", "symbolic", "math"])
+                is_pure = profile['purity_score'] > 0.7
 
-                if is_math_candidate or is_high_purity:
-                    contexts = extract_context_samples(
-                        G[:, latent_idx].numpy(),
-                        token_ids,
-                        sample_ids,
-                        local_model.tokenizer,
-                        original_prompts,
-                        mass_threshold=args.mass_threshold
-                    )
+                if is_math or is_pure:
+                    contexts = extract_context_samples(G[:, latent_idx].numpy(), token_ids, sample_ids,
+                                                       local_model.tokenizer, original_prompts, args.mass_threshold)
 
-                    llm_profile = generate_llm_label_and_test_cases(gemini_client, contexts)
-                    supervised_results[latent_idx]['llm_refined_profile'] = llm_profile
+                    try:
+                        llm_profile = generate_llm_label_and_test_cases(gemini_client, contexts)
+                        supervised_results[latent_idx]['llm_refined_profile'] = llm_profile
+                        time.sleep(6)
+                    except Exception as e:
+                        print(f"\n[Fatal] Stopping at feature {latent_idx} due to: {e}")
+                        with open(output_json_path, 'w') as f:
+                            json.dump(supervised_results, f, indent=2)
+                        return
 
-                    # API (15 RPM -> 4s per request)
-                    # Delay to avoid hitting Gemini's rate limits (15 requests per minute for many models)
-                    time.sleep(4)
                 else:
                     supervised_results[latent_idx]['llm_refined_profile'] = {"label": "skipped (low relevance)"}
 
-                with open(layer_folder / "feature_analysis_supervised.json", 'w') as f:
+                with open(output_json_path, 'w') as f:
                     json.dump(supervised_results, f, indent=2)
+
+        # Unsupervised Analysis (Logit Lens)
+        if not args.skip_vocab:
+            unsupervised_results = analyze_features_unsupervised(F=F, local_model=local_model, layer=layer_num,
+                                                                 mode=mode, top_k_tokens=args.top_k_unsupervised)
+            with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
+                json.dump(unsupervised_results, f, indent=2)
+
 
     print(f"\nAnalysis complete. Files saved in {args.results_dir}")
 
