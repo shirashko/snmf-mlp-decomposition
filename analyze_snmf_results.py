@@ -157,7 +157,10 @@ if __name__ == "__main__":
 """
 python analyze_snmf_results.py \
     --model-path "models/gemma2-2.03B_best_unlearn_model" \
-    --results-dir "./test_output" \
-    --dominance-threshold 0.5 \
+    --results-dir "./final_run_all_layers" \
+    --data-path "data/data_subsampled.json" \
+    --dominance-threshold 0.4 \
+    --top-k-supervised 50 \
+    --top-k-unsupervised 64 \
     --save-raw
 """
