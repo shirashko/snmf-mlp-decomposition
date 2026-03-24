@@ -159,9 +159,12 @@ if __name__ == "__main__":
 python train_snmf.py \
     --model-path "models/gemma2-2.03B_best_unlearn_model" \
     --data-path "data/data_subsampled.json" \
-    --layers "0-5" \
+    --layers "0-13" \
+    --rank 256 \
+    --sparsity 0.08 \
     --init "svd" \
-    --rank 200 \
-    --max-iter 5000 \
-    --output-dir "./test_output"
+    --normalize \
+    --max-iter 10000 \
+    --batch-size 8 \
+    --output-dir "./final_run_all_layers"
 """
