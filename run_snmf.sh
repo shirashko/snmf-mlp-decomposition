@@ -36,7 +36,7 @@ echo "--------------------------------------------------------"
 
 python train_snmf.py \
     --model-path "models/gemma2-2.03B_best_unlearn_model" \
-    --data-path "data/data.json" \
+    --data-path "data/data_subsampled.json" \
     --output-dir "outputs/snmf_train_results" \
     --layers "0,3,5,13" \
     --rank 25 \
