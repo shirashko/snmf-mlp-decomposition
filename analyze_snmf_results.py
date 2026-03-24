@@ -94,6 +94,8 @@ def main():
             if idx in supervised_results and 'llm_refined_profile' in v:
                 supervised_results[idx]['llm_refined_profile'] = v['llm_refined_profile']
 
+        with open(output_json_path, 'w') as f:
+            json.dump(supervised_results, f, indent=2)
         # 3. LLM Semantic Refinement
         if args.run_llm:
             print(f"Refining labels with Gemini for Layer {layer_num}...")
