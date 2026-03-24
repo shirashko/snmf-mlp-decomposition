@@ -31,10 +31,21 @@ from model_utils import LocalModel, load_local_model
 from activation_utils import LocalActivationGenerator
 from data_utils.concept_dataset import SupervisedConceptDataset
 from factorization.seminmf import NMFSemiNMF
+from dotenv import load_dotenv
+import os
+
 from experiments.snmf_interp.generate_vocab_proj import (
     get_vocab_proj_gemma_hf,
     get_vocab_proj_residual_hf,
 )
+
+load_dotenv()
+hf_token = os.getenv("HF_TOKEN")
+if hf_token:
+    os.environ["HF_TOKEN"] = hf_token
+    print("Successfully loaded HF_TOKEN from .env")
+else:
+    print("Warning: HF_TOKEN not found in .env file. Gated models may fail to load.")
 
 
 def set_seed(seed: int) -> None:
@@ -411,6 +422,9 @@ def main():
     activations_per_layer, token_ids, sample_ids = act_gen.generate_activations(
         prompts=prompts, layers=layers, batch_size=args.batch_size
     )
+
+    del model
+    torch.cuda.empty_cache()
 
     # Run SNMF on each layer
     all_results = {}
