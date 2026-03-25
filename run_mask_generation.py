@@ -1,49 +1,47 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig
-from create_snmf_mask import generate_optimized_snmf_mask
+from create_snmf_mask import generate_optimized_snmf_mask, generate_random_matching_mask
 
 
 def run_main():
-    # --- 1. Configurations ---
     model_path = "models/gemma2-2.03B_pretrained"
     results_dir = "./pretrained_results"
-    output_mask_path = "snmf_pretrained_mask.pt"
-
-    # Thresholds for surgical precision
-    SCD_THRESHOLD = 0.2  # Minimal specificity
-    PURITY_THRESHOLD = 0  # Minimal purity
+    shared_name_prefix = "snmf_mask"
+    output_mask_path = f"{shared_name_prefix}.pt"
+    output_random_mask_path = f"random_baseline_{shared_name_prefix}.pt"
 
     print(f"[*] Initializing model structure for {model_path}...")
 
-    # We load only the config and create an empty model to save VRAM
-    # This is enough to get parameter names and shapes for the mask
+    # Load config and initialize empty model on meta device to save memory
     config = AutoConfig.from_pretrained(model_path)
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(config)
 
-    # --- 2. Generate the Mask ---
-    print(f"[*] Generating mask from SNMF results in: {results_dir}")
-
-    # Note: If generate_optimized_snmf_mask is in the same file,
-    # make sure it handles the 'meta' device by creating masks on CPU
-    mask = generate_optimized_snmf_mask(
+    # 1. Generate Localized SNMF Mask
+    snmf_mask = generate_optimized_snmf_mask(
         model=model,
         results_dir=results_dir,
+        threshold=0.02,
+        purity_threshold=0.35,
+        target_projections=["down_proj"]
     )
 
-    # --- 3. Save the Mask ---
-    # Convert meta-device tensors to CPU before saving
-    mask_to_save = {k: v for k, v in mask.items() if torch.any(v > 0)}
+    # 2. Generate Random Baseline Mask for comparison
+    random_mask = generate_random_matching_mask(snmf_mask, config, mode="global", target_projections=["down_proj"])
 
-    print(f"[*] Saving mask with {len(mask_to_save)} affected layers to {output_mask_path}...")
-    torch.save(mask_to_save, output_mask_path)
+    # 3. Filter and Save Masks
+    snmf_to_save = {k: v for k, v in snmf_mask.items() if torch.any(v > 0)}
+    random_to_save = {k: v for k, v in random_mask.items() if torch.any(v > 0)}
+
+    print(f"[*] Saving SNMF mask to {output_mask_path}...")
+    torch.save(snmf_to_save, output_mask_path)
+
+    print(f"[*] Saving Random baseline mask to {output_random_mask_path}...")
+    torch.save(random_to_save, output_random_mask_path)
 
     print("\n[✔] Execution finished successfully.")
-    print(f"You can now use '{output_mask_path}' in your distillation loop.")
-
-
+    print(f"You can now use both masks to compare localization vs random noise in your evaluation.")
 
 
 if __name__ == "__main__":
-    # Ensure the generate_optimized_snmf_mask function is defined above or imported
     run_main()
