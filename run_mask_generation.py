@@ -5,13 +5,13 @@ from create_snmf_mask import generate_optimized_snmf_mask
 
 def run_main():
     # --- 1. Configurations ---
-    model_path = "models/gemma2-2.03B_best_unlearn_model"
-    results_dir = "./final_run_all_layers"
-    output_mask_path = "snmf_unlearning_mask.pt"
+    model_path = "models/gemma2-2.03B_pretrained"
+    results_dir = "./pretrained_results"
+    output_mask_path = "snmf_pretrained_mask.pt"
 
     # Thresholds for surgical precision
-    SCD_THRESHOLD = 0.5  # Minimal specificity
-    PURITY_THRESHOLD = 0.4  # Minimal purity
+    SCD_THRESHOLD = 0.2  # Minimal specificity
+    PURITY_THRESHOLD = 0  # Minimal purity
 
     print(f"[*] Initializing model structure for {model_path}...")
 
@@ -29,8 +29,6 @@ def run_main():
     mask = generate_optimized_snmf_mask(
         model=model,
         results_dir=results_dir,
-        scd_threshold=SCD_THRESHOLD,
-        purity_threshold=PURITY_THRESHOLD
     )
 
     # --- 3. Save the Mask ---
@@ -42,6 +40,8 @@ def run_main():
 
     print("\n[✔] Execution finished successfully.")
     print(f"You can now use '{output_mask_path}' in your distillation loop.")
+
+
 
 
 if __name__ == "__main__":
