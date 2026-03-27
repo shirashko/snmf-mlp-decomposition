@@ -16,10 +16,10 @@ CONCEPT_ROOTS = {
 def generate_optimized_snmf_mask(
         model: torch.nn.Module,
         results_dir: str,
-        threshold: float = 0.02,
+        threshold: float = 0.3,
         target_concepts: list = ["multiplication", "division"],
         min_token_matches: int = 3,
-        purity_threshold: float = 0.35,
+        purity_threshold: float = 0.2,
         target_projections: list = ["up_proj", "down_proj", "gate_proj"]
 ):
     """
@@ -80,8 +80,8 @@ def generate_optimized_snmf_mask(
             # Unsupervised check (token-based search)
             feat_unsupervised = unsupervised.get(feat_idx, {})
             all_feat_tokens = (
-                    [t.strip().lower() for t in feat_unsupervised.get('positive_tokens', [])[:15]] +
-                    [t.strip().lower() for t in feat_unsupervised.get('negative_tokens', [])[:15]]
+                    [t.strip().lower() for t in feat_unsupervised.get('positive_tokens', [])[:40]] +
+                    [t.strip().lower() for t in feat_unsupervised.get('negative_tokens', [])[:40]]
             )
 
             syntax_hits = sum(1 for root in syntax_roots if any(root in tok for tok in all_feat_tokens))

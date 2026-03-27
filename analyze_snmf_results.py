@@ -10,7 +10,7 @@ torch.serialization.add_safe_globals([GemmaTokenizerFast])
 
 from utils import resolve_device, set_seed
 from model_utils import load_local_model
-from supervised_analysis import analyze_features_supervised
+from supervised_analysis import analyze_features_supervised, plot_layer_concept_trends
 from unsupervised_analysis import analyze_features_unsupervised
 from data_utils.concept_dataset import SupervisedConceptDataset
 from feature_interpreter import FeatureInterpreter
@@ -149,6 +149,12 @@ def main():
             with open(layer_folder / "feature_analysis_unsupervised.json", 'w') as f:
                 json.dump(unsupervised_results, f, indent=2)
 
+    print("\nGenerating model-wide trend plots...")
+    try:
+        plot_layer_concept_trends(args.results_dir)
+    except Exception as e:
+        print(f"Could not generate plots: {e}")
+
     print(f"\nAnalysis complete. Files saved in {args.results_dir}")
 
 
@@ -160,6 +166,16 @@ if __name__ == "__main__":
 python analyze_snmf_results.py \
     --model-path "models/gemma2-2.03B_best_unlearn_model" \
     --results-dir "./final_run_all_layers" \
+    --data-path "data/data_subsampled.json" \
+    --dominance-threshold 0.4 \
+    --top-k-supervised 50 \
+    --top-k-unsupervised 64 \
+    --save-raw
+    
+    
+python analyze_snmf_results.py \
+    --model-path "models/gemma2-2.03B_pretrained" \
+    --results-dir "./pretrained_results" \
     --data-path "data/data_subsampled.json" \
     --dominance-threshold 0.4 \
     --top-k-supervised 50 \
