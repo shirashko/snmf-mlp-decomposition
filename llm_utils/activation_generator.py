@@ -8,7 +8,44 @@ from tqdm import tqdm
 
 # Project-specific imports
 from transformer_lens import HookedTransformer, utils
+from transformer_lens.model_bridge import TransformerBridge
 from data_utils.concept_dataset import ConceptDataset, SupervisedConceptDataset
+
+
+def _needs_transformer_bridge(model_name: str) -> bool:
+    name = model_name.lower()
+    return "qwen3.5" in name or "qwen3_5" in name
+
+
+def _load_tl_model(model_name: str, model_device: str):
+    """Load a TransformerLens model (HookedTransformer or TransformerBridge)."""
+    if _needs_transformer_bridge(model_name):
+        # Qwen3.5-2B checkpoints ship as multimodal configs; load text-only
+        # weights so TransformerLens picks Qwen3_5ForCausalLM (no torchvision).
+        from transformers import AutoConfig, Qwen3_5ForCausalLM
+
+        config = AutoConfig.from_pretrained(model_name)
+        text_config = (
+            config.get_text_config()
+            if hasattr(config, "get_text_config")
+            else getattr(config, "text_config", config)
+        )
+        hf_model = Qwen3_5ForCausalLM.from_pretrained(
+            model_name,
+            config=text_config,
+            torch_dtype=torch.bfloat16,
+        )
+        if model_device and model_device != "cpu":
+            hf_model = hf_model.to(model_device)
+        model = TransformerBridge.boot_transformers(
+            model_name,
+            device=model_device,
+            hf_model=hf_model,
+            dtype=torch.bfloat16,
+        )
+        model.enable_compatibility_mode()
+        return model
+    return HookedTransformer.from_pretrained(model_name, device=model_device)
 
 
 class ActivationGenerator:
@@ -28,12 +65,23 @@ class ActivationGenerator:
             data_device (str): Device to load the data onto.
             mode (str): Which activation to use ("mlp" or "residual").
         """
-        self.model = HookedTransformer.from_pretrained(model_name, device=model_device)
+        self.model = _load_tl_model(model_name, model_device)
         self.model_name = model_name  # store for later use in helper functions
         self.data_device = data_device
         self._mode = mode
         if mode not in ['mlp', 'residual', 'mlp_out']:
             raise RuntimeError(f"Mode: {mode} not supported")
+
+    def _model_device(self) -> torch.device:
+        return next(self.model.parameters()).device
+
+    def _input_ids_for_forward(self, batch) -> torch.Tensor:
+        """Place token ids on the model device. data_device is for activations only."""
+        if isinstance(batch, dict):
+            input_ids = batch["input_ids"]
+        else:
+            input_ids = batch
+        return input_ids.to(self._model_device())
 
     def _get_data_as_tensors(self, dataset: ConceptDataset, batch_size: int):
         """
@@ -129,12 +177,7 @@ class ActivationGenerator:
 
         with torch.no_grad():
             for batch in tqdm(data, desc="Generating multi-layer activations with freq"):
-                if isinstance(batch, dict):
-                    inputs = {k: v.to(self.data_device) for k, v in batch.items()}
-                    input_ids = inputs["input_ids"]
-                else:
-                    input_ids = batch.to(self.data_device)
-                    inputs = None
+                input_ids = self._input_ids_for_forward(batch)
 
                 # Run the model and obtain cache.
                 _, cache = self.model.run_with_cache(input_ids)
@@ -206,12 +249,7 @@ class ActivationGenerator:
 
         with torch.no_grad():
             for batch in tqdm(data, desc="Generating stacked activations with freq"):
-                if isinstance(batch, dict):
-                    inputs = {k: v.to(self.data_device) for k, v in batch.items()}
-                    input_ids = inputs["input_ids"]
-                else:
-                    input_ids = batch.to(self.data_device)
-                    inputs = None
+                input_ids = self._input_ids_for_forward(batch)
 
                 # Run the model and obtain cache.
                 _, cache = self.model.run_with_cache(input_ids)
@@ -275,12 +313,7 @@ class ActivationGenerator:
         
         with torch.no_grad():
             for batch in tqdm(data, desc="Generating period activations"):
-                if isinstance(batch, dict):
-                    inputs = {k: v.to(self.data_device) for k, v in batch.items()}
-                    input_ids = inputs["input_ids"]
-                else:
-                    input_ids = batch.to(self.data_device)
-                    inputs = None
+                input_ids = self._input_ids_for_forward(batch)
 
                 # Run the model and obtain cache.
                 _, cache = self.model.run_with_cache(input_ids)
