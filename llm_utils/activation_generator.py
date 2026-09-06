@@ -20,7 +20,7 @@ def _needs_transformer_bridge(model_name: str) -> bool:
 def _load_tl_model(model_name: str, model_device: str):
     """Load a TransformerLens model (HookedTransformer or TransformerBridge)."""
     if _needs_transformer_bridge(model_name):
-        # Qwen3.5-2B checkpoints ship as multimodal configs; load text-only
+        # Qwen3.5-2B checkpoints ship as multimodal configs, load text-only
         # weights so TransformerLens picks Qwen3_5ForCausalLM (no torchvision).
         from transformers import AutoConfig, Qwen3_5ForCausalLM
 
@@ -116,6 +116,11 @@ class ActivationGenerator:
         period_id = self.model.tokenizer.encode(".")[0]
         return input_ids == period_id
 
+    def _select_masked_acts(self, acts: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Keep non-masked activations, align mask to acts before indexing."""
+        mask = mask.bool().to(device=acts.device)
+        return acts[mask].reshape(-1, acts.size(-1)).to(self.data_device)
+
     def build_vocab_frequency(self, dataset: ConceptDataset, batch_size: int = 5) -> Counter:
         """
         Builds a vocabulary frequency Counter over the entire dataset.
@@ -194,10 +199,9 @@ class ActivationGenerator:
                 for idx, layer in enumerate(layers):
                     hook_str = self._get_mlp_hook_string(layer)
                     # Get activations: shape (batch_size, seq_len, d_model)
-                    acts = cache[hook_str].detach().to(self.data_device)
-                    # Extract only non-padding activations.
-                    nonpad_acts = acts[mask.bool()].view(-1, acts.size(-1))
-                    # Immediately move activations to CPU.
+                    acts = cache[hook_str].detach()
+                    # Extract only non-padding activations (mask may be on model device).
+                    nonpad_acts = self._select_masked_acts(acts, mask)
                     all_layer_activations[idx].append(nonpad_acts.cpu())
                 
                 del cache
@@ -266,9 +270,8 @@ class ActivationGenerator:
                 for idx, layer in enumerate(layers):
                     hook_str = self._get_mlp_hook_string(layer)
                     # Get the activations (batch_size, seq_len, d_model)
-                    acts = cache[hook_str].detach().to(self.data_device)
-                    # Extract only non-padding activations.
-                    nonpad_acts = acts[mask.bool()].view(-1, acts.size(-1))
+                    acts = cache[hook_str].detach()
+                    nonpad_acts = self._select_masked_acts(acts, mask)
                     all_layer_activations[idx].append(nonpad_acts.cpu())
                 
                 del cache
@@ -324,9 +327,8 @@ class ActivationGenerator:
                 for idx, layer in enumerate(layers):
                     hook_str = self._get_mlp_hook_string(layer)
                     # Get activations: shape (batch_size, seq_len, d_model)
-                    acts = cache[hook_str].detach().to(self.data_device)
-                    # Extract activations corresponding to period tokens.
-                    period_acts = acts[period_mask.bool()].view(-1, acts.size(-1))
+                    acts = cache[hook_str].detach()
+                    period_acts = self._select_masked_acts(acts, period_mask)
                     period_layer_activations[idx].append(period_acts.cpu())
                 
                 del cache
